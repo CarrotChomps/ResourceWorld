@@ -134,7 +134,11 @@ public class CustomWorld implements Listener {
     }
 
     private void packageWorld(World rw) {
+        Location spawnLocation = Bukkit.getWorld(Config.Setting.SETTINGS_SPAWN_WORLD.getString()).getSpawnLocation();
+
         Bukkit.unloadWorld(rw, true);
+
+        emptyWorld(rw, spawnLocation);
 
         Path worldFolder = rw.getWorldFolder().toPath();
 
@@ -290,6 +294,9 @@ public class CustomWorld implements Listener {
                 }
                 break;
         }
+
+        // emptyWorld
+        emptyWorld(world, spawnLocation);
 
         ResourceWorld plugin = ResourceWorld.getInstance();
 
