@@ -7,6 +7,7 @@ import me.nik.resourceworld.files.Data;
 import me.nik.resourceworld.files.Lang;
 import me.nik.resourceworld.files.commentedfiles.CommentedFileConfiguration;
 import me.nik.resourceworld.gui.GuiListener;
+import me.nik.resourceworld.managers.ChunkyHook;
 import me.nik.resourceworld.managers.PapiHook;
 import me.nik.resourceworld.managers.UpdateChecker;
 import me.nik.resourceworld.managers.custom.CustomWorld;
@@ -20,6 +21,7 @@ import me.nik.resourceworld.tasks.AlwaysDay;
 import me.nik.resourceworld.tasks.ResetEndWorld;
 import me.nik.resourceworld.tasks.ResetNetherWorld;
 import me.nik.resourceworld.tasks.ResetWorld;
+import me.nik.resourceworld.utils.ChatUtils;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Difficulty;
@@ -51,6 +53,7 @@ public final class ResourceWorld extends JavaPlugin {
     };
     private final Map<ResourceWorldType, CustomWorld> resourceWorlds = new HashMap<>();
     private final List<ListenerModule> listenerModules = new ArrayList<>();
+    private ChunkyHook chunkyHook = new ChunkyHook(this);
 
     public static ResourceWorld getInstance() {
         return plugin;
@@ -292,6 +295,13 @@ public final class ResourceWorld extends JavaPlugin {
 
         //BStats
         new MetricsLite(this, 6981);
+    }
+
+    public ChunkyHook getChunky() {
+        if(!chunkyHook.isLoaded()) {
+            chunkyHook.verifyChunky();
+        }
+        return chunkyHook;
     }
 
     public CustomWorld getResourceWorld(ResourceWorldType type) {

@@ -3,6 +3,7 @@ package me.nik.resourceworld.managers.custom;
 import me.nik.resourceworld.ResourceWorld;
 import me.nik.resourceworld.api.ResourceWorldType;
 import me.nik.resourceworld.files.Config;
+import me.nik.resourceworld.managers.ChunkyHook;
 import me.nik.resourceworld.managers.MsgType;
 import me.nik.resourceworld.utils.ChatUtils;
 import me.nik.resourceworld.utils.MiscUtils;
@@ -54,62 +55,45 @@ public class CustomWorld implements Listener {
         return name;
     }
 
+    //TODO
+    // 1. Pregen a world once it's loaded using chunky
+    // 2. Detect chunky task is finished
+    // 3. Package world folder into tar.gz
+    // 4. Send over to other boxes
     public CustomWorld generate() {
-
         boolean lazyInit = Config.Setting.WORLD_USE_LAZY_INIT.getBoolean();
         NamespacedKey worldKey = new NamespacedKey("minecraft", this.name);
-
-        // Unpackage zipped world file before init rw
         boolean unpackFirst = Config.Setting.WORLD_UNPACK_FIRST.getBoolean();
+
+        // Phase 1 = Unpack World First (if applicable)
+
         if (unpackFirst) {
-            ChatUtils.log("Unpacking First Enabled...");
-            // look up if there is a zipped world to use
-            Path packagedPath = ResourceWorld.getInstance().getDataPath()
-                    .resolve("packaged")
-                    .resolve(this.name + ".tar.gz");
-
-            // if so, unpack it
-            if (packagedPath.toFile().exists()) {
-                try {
-                    // create the destination
-                    Path destinationPath = Bukkit.getWorldContainer().toPath()
-                            .resolve("world")
-                            .resolve("dimensions")
-                            .resolve("minecraft")
-                            .toAbsolutePath()
-                            .normalize();
-
-                    // Ensure parent directories exist before unpacking
-                    if (!Files.exists(destinationPath.getParent())) {
-                        Files.createDirectories(destinationPath.getParent());
-                    }
-
-                    // unpack using zip util
-                    TarGzUtil.unzip(packagedPath, destinationPath);
-
-                    ChatUtils.log("Unzipped Packaged World at=" + destinationPath.toString());
-                } catch (Exception e) {
-                    ChatUtils.log("An error occurred while unzipping packaged world.");
-                    e.printStackTrace();
-                }
-            } else {
-                ChatUtils.log("Failed to find packaged world path=" + packagedPath.toString());
-            }
-            // if not, fallback to normal generation
+            unpackWorldFirst();
+            ChatUtils.log("Generation Phase 1 Complete...");
+        } else {
+            ChatUtils.log("Generation Phase 1 Skipped...");
         }
 
+        // Phase 2 = Apply pre-generation settings.
+
+        // Bukkit trick to import world folder.
         WorldCreator wc = lazyInit ? new WorldCreator(worldKey) : new WorldCreator(this.name);
 
         // configure world creator
-        setupCreation(wc, unpackFirst);
+        configurePreGeneration(wc, unpackFirst);
 
         // Check if the world is already loaded in memory
         World rw = lazyInit ? Bukkit.getWorld(worldKey) : Bukkit.getWorld(this.name);
 
+        ChatUtils.log("Generation Phase 2 Complete...");
+
+        // Skip Phase 3 if rw already exists
         if (rw != null) {
             ChatUtils.log("A world already exists with this name, skipping generation...");
-            return configureWorld(rw);
+            return configurePostGeneration(rw);
         }
+
+        // Phase 3 = World Generation
 
         // Try to create the world
         try {
@@ -119,11 +103,96 @@ public class CustomWorld implements Listener {
             e.printStackTrace();
         }
 
-        // Apply configurations to the resource world
-        return configureWorld(rw);
+        ChatUtils.log("Generation Phase 3 Complete");
+
+        // Phase 4 = Apply post-generation settings.
+
+        CustomWorld customWorld = configurePostGeneration(rw);
+
+        ChatUtils.log("Generation Phase 4 Complete");
+
+        // Phase 5 = Optional pregeneration of chunks using Chunky
+        if (Config.Setting.WORLD_PREGEN.getBoolean()) {
+            World rwSnapshot = rw;
+            // call async pregeneration task; method wont hang trust
+            int renderDistancePadding = (16 * 10); // players generate chunks pass world border, this pregens past that range
+            ResourceWorld.getInstance().getChunky().pregenerate(rw, 0, 0, (borderSize / 2) + renderDistancePadding, () -> {
+                ChatUtils.log("Generation Phase 5 Complete");
+                Bukkit.getScheduler().runTaskAsynchronously(ResourceWorld.getInstance(), () -> {
+                    // start packaging if config true
+                    if (Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
+                        packageWorld(rwSnapshot);
+                    }
+                });
+            });
+        } else if(Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
+            ChatUtils.log("Generation Phase 5 Skipped");
+            packageWorld(rw);
+        }
+
+        return customWorld;
     }
 
-    private void setupCreation(WorldCreator wc, boolean unpackFirst) {
+    private void packageWorld(World rw) {
+        Bukkit.unloadWorld(rw, true);
+
+        Path worldFolder = rw.getWorldFolder().toPath();
+
+        Path packagedPath = ResourceWorld.getInstance().getDataPath()
+                .resolve("packaged")
+                .resolve(this.name + ".tar.gz");
+
+        ChatUtils.log("Packaging World...");
+        try {
+            TarGzUtil.zip(worldFolder, packagedPath);
+        } catch (Exception e) {
+            ChatUtils.log("Error while trying to pregenerate world: " + e.getMessage());
+        }
+    }
+
+    private void unpackWorldFirst() {
+
+        ChatUtils.log("Unpacking First Enabled...");
+        // look up if there is a zipped world to use
+        Path packagedPath = ResourceWorld.getInstance().getDataPath()
+                .resolve("packaged")
+                .resolve(this.name + ".tar.gz");
+
+        // if so, unpack it
+        if (packagedPath.toFile().exists()) {
+            try {
+                // create the destination
+                Path destinationPath = Bukkit.getWorldContainer().toPath()
+                        .resolve("world")
+                        .resolve("dimensions")
+                        .resolve("minecraft")
+                        .toAbsolutePath()
+                        .normalize();
+
+                // Ensure parent directories exist before unpacking
+                if (!Files.exists(destinationPath.getParent())) {
+                    Files.createDirectories(destinationPath.getParent());
+                }
+
+                // unpack using zip util
+                TarGzUtil.unzip(packagedPath, destinationPath);
+
+                ChatUtils.log("Unzipped Packaged World at=" + destinationPath.toString());
+            } catch (Exception e) {
+                ChatUtils.log("An error occurred while unzipping packaged world.");
+                e.printStackTrace();
+            }
+        } else {
+            ChatUtils.log("Failed to find packaged world path=" + packagedPath.toString());
+        }
+        // if not, fallback to normal generation
+    }
+
+    /**
+     * (Pre-generation)
+     * Apply settings to the world creator based on config; skips certain stage if unpackFirst is true.
+     */
+    private void configurePreGeneration(WorldCreator wc, boolean unpackFirst) {
 
         wc.type(this.type);
 
@@ -133,7 +202,7 @@ public class CustomWorld implements Listener {
 
         if (this.useSeed) wc.seed(this.seed);
 
-        if(unpackFirst) {
+        if (unpackFirst) {
             // skip generating world if prepacked
             ChatUtils.log("Placing packaged world...");
             return;
@@ -156,7 +225,11 @@ public class CustomWorld implements Listener {
         ChatUtils.log("World Creator Settings Applied...");
     }
 
-    private CustomWorld configureWorld(World rw) {
+    /**
+     * (Post generation)
+     * Apply settings to the world based no the settings in config
+     */
+    private CustomWorld configurePostGeneration(World rw) {
         if (rw != null) {
             if (this.useBorder) {
 
@@ -216,15 +289,6 @@ public class CustomWorld implements Listener {
                     spawnLocation = MiscUtils.stringToLocation(ResourceWorld.getInstance().getData().getString("spawn_location"));
                 }
                 break;
-        }
-
-        for (Player player : Bukkit.getOnlinePlayers()) {
-
-            if (!player.getWorld().getUID().equals(world.getUID())) continue;
-
-            player.teleport(spawnLocation);
-
-            player.sendMessage(MsgType.TELEPORTED_MESSAGE.getMessage());
         }
 
         ResourceWorld plugin = ResourceWorld.getInstance();
@@ -344,6 +408,19 @@ public class CustomWorld implements Listener {
             }, 80L);
 
         }, 80L);
+    }
+
+    private void emptyWorld(World world, Location spawnLocation) {
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+
+            if (!player.getWorld().getUID().equals(world.getUID())) continue;
+
+            player.teleport(spawnLocation);
+
+            player.sendMessage(MsgType.TELEPORTED_MESSAGE.getMessage());
+        }
+
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
