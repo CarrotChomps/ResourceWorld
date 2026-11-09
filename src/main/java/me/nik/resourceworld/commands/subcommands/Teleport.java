@@ -10,6 +10,7 @@ import me.nik.resourceworld.utils.custom.ExpiringMap;
 import net.milkbowl.vault.economy.Economy;
 import net.milkbowl.vault.economy.EconomyResponse;
 import org.bukkit.Bukkit;
+import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -105,7 +106,11 @@ public class Teleport extends SubCommand {
 
             case 1: {
 
-                world = Bukkit.getWorld(Config.Setting.WORLD_NAME.getString());
+                String worldName = Config.Setting.WORLD_NAME.getString();
+                boolean lazyInit = Config.Setting.WORLD_USE_LAZY_INIT.getBoolean();
+
+                world = Bukkit.getWorld(worldName);
+                if(lazyInit) world = Bukkit.getWorld(NamespacedKey.minecraft(worldName));
 
                 break;
             }

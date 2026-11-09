@@ -101,7 +101,13 @@ public class LocationFinder {
         if (isLocationSafe(location, world, environment)) {
 
             if (PAPER_API) {
-                player.teleportAsync(location);
+                player.teleportAsync(location).thenAccept(teleport -> {
+                    if(teleport) {
+                        ChatUtils.log("Teleport async passed.");
+                    } else {
+                        ChatUtils.log("Teleport async failed.");
+                    }
+                });
             }
 
             //Finally teleport and apply effects on the main thread.
@@ -126,7 +132,8 @@ public class LocationFinder {
                         player.playSound(player.getLocation(), Sound.valueOf(Config.Setting.TELEPORT_SOUND.getString()), 2, 2);
                     }
 
-                } catch (IllegalArgumentException ignored) {
+                } catch (Exception e) {
+                    ChatUtils.log("An exception occured when processing teleport location=" + e.getMessage());
                 }
             });
 
