@@ -5,6 +5,7 @@ import me.nik.resourceworld.files.commentedfiles.CommentedFileConfiguration;
 
 import java.io.File;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -86,6 +87,19 @@ public class Config {
         WORLD_UNPACK_FIRST("world.unpack_first", false, "Whether to unpack a zipped world within the plugin data folder before trying to create a map. Assuming the zip has the same name as resource world."),
         WORLD_PREGEN("world.pregen", false, "Whether to pregen the chunks using Chunky after a resource world generates"),
         WORLD_PACKAGE_AFTER("world.package_after", false, "Whether to package the resource world files into a tar.gz file after the resource world generates. This will wait for Chunky to pregen if enabled."),
+        WORLD_DELIVERY("world.delivery", "", "Packaged World Delivery Properties"),
+        WORLD_DELIVERY_ENABLED("world.delivery.enabled", false, "Whether to send the packaged world to configured destinations"),
+        WORLD_DELIVERY_METHOD("world.delivery.method", "LOCAL", "Delivery method: LOCAL or HTTP"),
+        WORLD_DELIVERY_LOCAL_PATHS("world.delivery.local_paths", Arrays.asList("plugins/ResourceWorld/packaged/resource_world-1.tar.gz", "plugins/ResourceWorld/packaged/resource_world-2.tar.gz"), "Local file destinations for packaged world delivery"),
+
+        WORLD_DELIVERY_HTTP("world.delivery.http", "", "HTTP World Delivery Properties"),
+        WORLD_DELIVERY_HTTP_RECEIVER_ENABLED("world.delivery.http.receiver_enabled", false, "Whether to accept incoming world packages over HTTP"),
+        WORLD_DELIVERY_HTTP_PORT("world.delivery.http.port", 8080, "Port used to receive HTTP world deliveries"),
+        WORLD_DELIVERY_HTTP_TOKEN("world.delivery.http.token", "", "Shared authentication token for HTTP world delivery"),
+        WORLD_DELIVERY_HTTP_DESTINATIONS("world.delivery.http.destinations", Collections.emptyList(), "HTTP endpoints to send packaged worlds to"),
+        WORLD_DELIVERY_HTTP_TIMEOUT("world.delivery.http.timeout", 60, "HTTP connection and response timeout in seconds"),
+        WORLD_DELIVERY_HTTP_MAX_SIZE_MB("world.delivery.http.max_size_mb", 2048, "Maximum accepted HTTP archive size in MB"),
+
         WORLD_USE_LAZY_INIT("world.use_lazy_init", false, "Allow for the Resource World Plugin to load even if there is already a world with the same named that exists."),
         WORLD_DATAPACK("world.datapack", "resource_world", "The Resource World Data Pack"),
         WORLD_DATAPACK_USE_BIOMES("world.use_biomes_from_datapack", false, "Whether to add biomes from a given Datapack."),

@@ -3,12 +3,8 @@ package me.nik.resourceworld.managers.custom;
 import me.nik.resourceworld.ResourceWorld;
 import me.nik.resourceworld.api.ResourceWorldType;
 import me.nik.resourceworld.files.Config;
-import me.nik.resourceworld.managers.ChunkyHook;
 import me.nik.resourceworld.managers.MsgType;
-import me.nik.resourceworld.utils.ChatUtils;
-import me.nik.resourceworld.utils.MiscUtils;
-import me.nik.resourceworld.utils.TaskUtils;
-import me.nik.resourceworld.utils.TarGzUtil;
+import me.nik.resourceworld.utils.*;
 import org.bukkit.*;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -36,6 +32,11 @@ public class CustomWorld implements Listener {
     private final boolean pvp;
     private final boolean keepInventory;
 
+    // runtime variables to help track generation
+    private Path path;
+    private WorldCreator creator;
+    private boolean packaging;
+
     public CustomWorld(String name, Difficulty difficulty, WorldType type, World.Environment environment, boolean structures, boolean useSeed, long seed, boolean useBorder, int borderSize, boolean pvp, boolean keepInventory, ResourceWorldType resourceWorldType) {
         this.name = name;
         this.difficulty = difficulty;
@@ -55,52 +56,59 @@ public class CustomWorld implements Listener {
         return name;
     }
 
-    //TODO
-    // 1. Pregen a world once it's loaded using chunky
-    // 2. Detect chunky task is finished
-    // 3. Package world folder into tar.gz
-    // 4. Send over to other boxes
     public CustomWorld generate() {
+
+        // we have a mannual package command, so this can happen.
+        if (packaging) {
+            throw new IllegalStateException("Cannot generate while packaging world: " + this.name);
+        }
+
         boolean lazyInit = Config.Setting.WORLD_USE_LAZY_INIT.getBoolean();
-        NamespacedKey worldKey = new NamespacedKey("minecraft", this.name);
         boolean unpackFirst = Config.Setting.WORLD_UNPACK_FIRST.getBoolean();
+        boolean hasPackage = unpackFirst && Files.isRegularFile(getPackagePath()); // make sure the package exists before unpacking
+
+        World rw = world();
 
         // Phase 1 = Unpack World First (if applicable)
 
-        if (unpackFirst) {
+        if (hasPackage) {
+
+            // Unload the existing world before replacing its files.
+            if (rw != null) {
+                ChatUtils.log("Unloading existing world before unpacking...");
+
+                unloadWorld(rw, false);
+                rw = null;
+            }
+
             unpackWorldFirst();
+
             ChatUtils.log("Generation Phase 1 Complete...");
+
         } else {
             ChatUtils.log("Generation Phase 1 Skipped...");
         }
 
-        // Phase 2 = Apply pre-generation settings.
-
-        // Bukkit trick to import world folder.
-        WorldCreator wc = lazyInit ? new WorldCreator(worldKey) : new WorldCreator(this.name);
-
-        // configure world creator
-        configurePreGeneration(wc, unpackFirst);
-
-        // Check if the world is already loaded in memory
-        World rw = lazyInit ? Bukkit.getWorld(worldKey) : Bukkit.getWorld(this.name);
-
-        ChatUtils.log("Generation Phase 2 Complete...");
-
-        // Skip Phase 3 if rw already exists
+        // Reuse the existing world if no new archive was unpacked.
         if (rw != null) {
-            ChatUtils.log("A world already exists with this name, skipping generation...");
+            ChatUtils.log("World already loaded, skipping generation...");
             return configurePostGeneration(rw);
         }
 
+        // Phase 2 = Apply pre-generation settings.
+
+        WorldCreator wc = lazyInit ? WorldCreator.ofKey(key()) : new WorldCreator(this.name);
+
+        configurePreGeneration(wc, hasPackage);
+
+        ChatUtils.log("Generation Phase 2 Complete...");
+
         // Phase 3 = World Generation
 
-        // Try to create the world
         try {
             rw = wc.createWorld();
         } catch (Exception e) {
-            ChatUtils.log("Error while trying to create world: " + e.getMessage());
-            e.printStackTrace();
+            throw new IllegalStateException("Failed to create world: " + this.name, e);
         }
 
         ChatUtils.log("Generation Phase 3 Complete");
@@ -112,46 +120,116 @@ public class CustomWorld implements Listener {
         ChatUtils.log("Generation Phase 4 Complete");
 
         // Phase 5 = Optional pregeneration of chunks using Chunky
+
         if (Config.Setting.WORLD_PREGEN.getBoolean()) {
-            World rwSnapshot = rw;
-            // call async pregeneration task; method wont hang trust
-            int renderDistancePadding = (16 * 10); // players generate chunks pass world border, this pregens past that range
+
+            int renderDistancePadding = (16 * 10); // players generate chunks past world border, this pregens past that range
+
             ResourceWorld.getInstance().getChunky().pregenerate(rw, 0, 0, (borderSize / 2) + renderDistancePadding, () -> {
+
                 ChatUtils.log("Generation Phase 5 Complete");
-                Bukkit.getScheduler().runTaskAsynchronously(ResourceWorld.getInstance(), () -> {
-                    // start packaging if config true
+
+                // Allow pending chunk generation tasks to settle before unloading.
+                Bukkit.getScheduler().runTaskLater(ResourceWorld.getInstance(), () -> {
+
                     if (Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
-                        packageWorld(rwSnapshot);
+                        packageWorld();
                     }
-                });
+
+                }, 20L * 10); // TODO make delay and the padding configurable
             });
-        } else if(Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
+
+        } else if (Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
+
             ChatUtils.log("Generation Phase 5 Skipped");
-            packageWorld(rw);
+            packageWorld();
         }
 
         return customWorld;
     }
 
-    private void packageWorld(World rw) {
-        Bukkit.getScheduler().runTask(ResourceWorld.getInstance(), ()-> {
-            Location spawnLocation = Bukkit.getWorld(Config.Setting.SETTINGS_SPAWN_WORLD.getString()).getSpawnLocation();
+    public void packageWorld() {
 
-            Bukkit.unloadWorld(rw, true);
+        Bukkit.getScheduler().runTask(ResourceWorld.getInstance(), () -> {
 
-            emptyWorld(rw, spawnLocation);
+            if (packaging) {
+                ChatUtils.log("World packaging is already in progress: " + this.name);
+                return;
+            }
 
-            Path worldFolder = rw.getWorldFolder().toPath();
+            World rw = world();
 
-            Path packagedPath = ResourceWorld.getInstance().getDataPath()
-                    .resolve("packaged")
-                    .resolve(this.name + ".tar.gz");
+            if (rw == null) {
+                ChatUtils.log("Cannot package world because it is not loaded.");
+                return;
+            }
 
-            ChatUtils.log("Packaging World...");
+            Path worldFolder = rw.getWorldFolder().toPath().toAbsolutePath().normalize();
+
+            Path packagedPath = getPackagePath();
+
             try {
-                TarGzUtil.zip(worldFolder, packagedPath);
+                // Empty world, save chunks and close world storage.
+                unloadWorld(rw, true);
+                packaging = true;
+
             } catch (Exception e) {
-                ChatUtils.log("Error while trying to pregenerate world: " + e.getMessage());
+                ChatUtils.log("Failed to unload world before packaging: " + e.getMessage());
+                return;
+            }
+
+            try {
+                Bukkit.getScheduler().runTaskAsynchronously(ResourceWorld.getInstance(), () -> {
+
+                    try {
+
+                        ChatUtils.log("Packaging World...");
+
+                        TarGzUtil.zip(worldFolder, packagedPath);
+
+                        ChatUtils.log("World packaged successfully.");
+
+                        // Check config if we are delivering.
+                        if (Config.Setting.WORLD_DELIVERY_ENABLED.getBoolean()) {
+
+                            // Call delivery and then any code that needs to follow.
+                            WorldDeliveryService.deliverPackagedWorld(packagedPath).whenComplete((result, error) -> {
+                                if (error != null) {
+                                    ChatUtils.log("World delivery failed: " + error.getMessage());
+                                } else {
+                                    ChatUtils.log("World delivery completed successfully.");
+                                }
+                                finishPackaging(); // hey look, code that needs to follow!
+                            });
+                        } else {
+                            finishPackaging();
+                        }
+
+                    } catch (Exception e) {
+                        ChatUtils.log("Error while packaging world: " + e.getMessage());
+                        e.printStackTrace();
+                        // still end packaging
+                        finishPackaging();
+                    }
+                });
+            } catch (Exception e) {
+                // Scheduling can fail after the world has already been unloaded.
+                finishPackaging();
+                throw e;
+            }
+        });
+    }
+
+    private void finishPackaging() {
+        Bukkit.getScheduler().runTask(ResourceWorld.getInstance(), () -> {
+            try {
+                loadWorld();
+                ChatUtils.log("World reloaded after packaging: " + this.name);
+            } catch (Exception e) {
+                ChatUtils.log("Failed to reload world after packaging: " + e.getMessage());
+                e.printStackTrace();
+            } finally {
+                packaging = false;
             }
         });
     }
@@ -159,44 +237,55 @@ public class CustomWorld implements Listener {
     private void unpackWorldFirst() {
 
         ChatUtils.log("Unpacking First Enabled...");
-        // look up if there is a zipped world to use
-        Path packagedPath = ResourceWorld.getInstance().getDataPath()
-                .resolve("packaged")
-                .resolve(this.name + ".tar.gz");
 
-        // if so, unpack it
-        if (packagedPath.toFile().exists()) {
-            try {
-                // create the destination
-                Path destinationPath = Bukkit.getWorldContainer().toPath()
-                        .resolve("world")
-                        .resolve("dimensions")
-                        .resolve("minecraft")
-                        .toAbsolutePath()
-                        .normalize();
+        // Look up if there is a packaged world to use.
+        Path packagedPath = getPackagePath();
 
-                // Ensure parent directories exist before unpacking
-                if (!Files.exists(destinationPath.getParent())) {
-                    Files.createDirectories(destinationPath.getParent());
-                }
-
-                // unpack using zip util
-                TarGzUtil.unzip(packagedPath, destinationPath);
-
-                ChatUtils.log("Unzipped Packaged World at=" + destinationPath.toString());
-            } catch (Exception e) {
-                ChatUtils.log("An error occurred while unzipping packaged world.");
-                e.printStackTrace();
-            }
-        } else {
-            ChatUtils.log("Failed to find packaged world path=" + packagedPath.toString());
+        if (!Files.isRegularFile(packagedPath)) {
+            throw new IllegalStateException("Failed to find packaged world path=" + packagedPath);
         }
-        // if not, fallback to normal generation
+
+        try {
+            // Create the destination.
+            Path destinationPath = existingWorldFolder();
+
+            // Ensure destination directories exist before unpacking.
+            Files.createDirectories(destinationPath);
+
+            // Unpack using tar.gz util.
+            TarGzUtil.unzip(packagedPath, destinationPath);
+
+            ChatUtils.log("Unzipped Packaged World at=" + destinationPath);
+
+        } catch (Exception e) {
+
+            ChatUtils.log("An error occurred while unzipping packaged world.");
+            throw new IllegalStateException("Failed to unpack world: " + this.name, e);
+        }
+    }
+
+    private Path existingWorldFolder() {
+        if (path != null) return path;
+
+        if (Config.Setting.WORLD_USE_LAZY_INIT.getBoolean()) {
+
+            if (Bukkit.getWorlds().isEmpty()) {
+                throw new IllegalStateException("No owning world loaded for dimension: " + key());
+            }
+
+            // proper world folder look up
+            return Bukkit.getWorldContainer().toPath().resolve("dimensions").resolve(key().getNamespace()).resolve(key().getKey()).toAbsolutePath().normalize();
+        }
+        return Bukkit.getWorldContainer().toPath().resolve(this.name).toAbsolutePath().normalize();
     }
 
     /**
      * (Pre-generation)
-     * Apply settings to the world creator based on config; skips certain stage if unpackFirst is true.
+     * Apply settings to the world creator based on config;
+     * skips biome provider setup if an archive was unpacked.
+     *
+     * @param wc          The World Creator loading in the Resource World
+     * @param unpackFirst Whether this was called with the world already unpacked. (no pre-generation needed)
      */
     private void configurePreGeneration(WorldCreator wc, boolean unpackFirst) {
 
@@ -213,204 +302,227 @@ public class CustomWorld implements Listener {
             ChatUtils.log("Placing packaged world...");
             return;
         }
-        // Grab config defined biome providing datapack and demision name.
+
+        // Grab config defined biome providing datapack and dimension name.
+
         try {
+
             String datapack = Config.Setting.WORLD_DATAPACK_DATAPACK_NAME.getString();
             String dimensionDef = Config.Setting.WORLD_DATAPACK_DIMENSION_NAME.getString();
+
             if (datapack.isEmpty() || dimensionDef.isEmpty()) {
+
                 ChatUtils.log("Invalid config for datapack or dimension, check config.");
+
             } else {
-                // Inject custom datapack biome provider
+
+                // Inject custom datapack biome provider.
                 wc.biomeProvider(new DatapackBiomeProvider(datapack, dimensionDef));
+
                 ChatUtils.log("Datapack Biomes added...");
             }
+
         } catch (Exception e) {
+
             ChatUtils.log("Error while trying to configure biome provider: " + e.getMessage());
             e.printStackTrace();
         }
+
         ChatUtils.log("World Creator Settings Applied...");
     }
 
     /**
      * (Post generation)
-     * Apply settings to the world based no the settings in config
+     * Apply settings to the world based on the settings in config.
      */
     private CustomWorld configurePostGeneration(World rw) {
-        if (rw != null) {
-            if (this.useBorder) {
 
-                WorldBorder wb = rw.getWorldBorder();
-
-                wb.setCenter(0, 0);
-
-                wb.setSize(this.borderSize);
-            }
-
-            rw.setPVP(this.pvp);
-
-            rw.setDifficulty(this.difficulty);
-
-            if (!Bukkit.getWorlds().contains(rw)) {
-                Bukkit.getWorlds().add(rw);
-            }
-
-            if (!MiscUtils.isLegacy() && this.keepInventory) {
-                rw.setGameRule(GameRule.KEEP_INVENTORY, true);
-            }
-        } else {
-            ChatUtils.log("Error while initializing world instance for " + this.name);
+        if (rw == null) {
+            throw new IllegalStateException("Error while initializing world instance for " + this.name);
         }
+
+        if (this.useBorder) {
+
+            WorldBorder wb = rw.getWorldBorder();
+
+            wb.setCenter(0, 0);
+
+            wb.setSize(this.borderSize);
+        }
+
+        rw.setPVP(this.pvp);
+
+        rw.setDifficulty(this.difficulty);
+
+        if (!MiscUtils.isLegacy() && this.keepInventory) {
+            rw.setGameRule(GameRule.KEEP_INVENTORY, true);
+        }
+
         ChatUtils.log("World Config Applied...");
+
         return this;
     }
 
     public void reset() {
 
-        ChatUtils.log("Executing world reset...");
-
-        //Phase 1
-
-        boolean lazyInit = Config.Setting.WORLD_USE_LAZY_INIT.getBoolean();
-
-        // make sure we are grabbing the world key if we are lazy init
-        World world = lazyInit ? Bukkit.getWorld(new NamespacedKey("minecraft", this.name)) : Bukkit.getWorld(this.name);
-
-        if (world == null) return;
-
-        Location spawnLocation = Bukkit.getWorld(Config.Setting.SETTINGS_SPAWN_WORLD.getString()).getSpawnLocation();
-
-        switch (this.resourceWorldType) {
-            case RESOURCE_WORLD:
-                if (Config.Setting.WORLD_RESET_ON_STARTUP.getBoolean()) {
-                    spawnLocation = MiscUtils.stringToLocation(ResourceWorld.getInstance().getData().getString("spawn_location"));
-                }
-                break;
-            case RESOURCE_NETHER:
-                if (Config.Setting.NETHER_RESET_ON_STARTUP.getBoolean()) {
-                    spawnLocation = MiscUtils.stringToLocation(ResourceWorld.getInstance().getData().getString("spawn_location"));
-                }
-                break;
-            case RESOURCE_END:
-                if (Config.Setting.END_RESET_ON_STARTUP.getBoolean()) {
-                    spawnLocation = MiscUtils.stringToLocation(ResourceWorld.getInstance().getData().getString("spawn_location"));
-                }
-                break;
+        if (packaging) {
+            ChatUtils.log("Cannot reset while packaging world: " + this.name);
+            return;
         }
 
-        // emptyWorld
-        emptyWorld(world, spawnLocation);
+        ChatUtils.log("Executing world reset...");
+
+        // Reset Phase 1 = Event Registration
+
+        World rw = world();
+
+        if (rw == null) return;
 
         ResourceWorld plugin = ResourceWorld.getInstance();
 
+        // Register listener before the reset starts.
         Bukkit.getPluginManager().registerEvents(this, plugin);
 
-        ChatUtils.log("Phase 1 completed...");
+        ChatUtils.log("Reset Phase 1 completed...");
 
-        //Phase 2
+        // Reset Phase 2 = World Deletion
         TaskUtils.taskLater(() -> {
 
-            switch (this.resourceWorldType) {
+            // Ensure the world still exists before proceeding.
+            World currentWorld = world();
 
-                case RESOURCE_END:
+            try {
 
-                    Bukkit.broadcastMessage(MsgType.RESETTING_THE_END.getMessage());
+                switch (this.resourceWorldType) {
 
-                    if (Config.Setting.END_STORE_TIME.getBoolean()) {
-                        plugin.getData().set("end.millis", System.currentTimeMillis());
-                    }
+                    case RESOURCE_END:
 
-                    plugin.getData().set("end.papi", System.currentTimeMillis());
+                        Bukkit.broadcastMessage(MsgType.RESETTING_THE_END.getMessage());
 
-                    break;
+                        if (Config.Setting.END_STORE_TIME.getBoolean()) {
+                            plugin.getData().set("end.millis", System.currentTimeMillis());
+                        }
 
-                case RESOURCE_WORLD:
+                        plugin.getData().set("end.papi", System.currentTimeMillis());
 
-                    Bukkit.broadcastMessage(MsgType.RESETTING_THE_WORLD.getMessage());
+                        break;
 
-                    if (Config.Setting.WORLD_STORE_TIME.getBoolean()) {
-                        plugin.getData().set("world.millis", System.currentTimeMillis());
-                    }
+                    case RESOURCE_WORLD:
 
-                    plugin.getData().set("world.papi", System.currentTimeMillis());
+                        Bukkit.broadcastMessage(MsgType.RESETTING_THE_WORLD.getMessage());
 
-                    break;
+                        if (Config.Setting.WORLD_STORE_TIME.getBoolean()) {
+                            plugin.getData().set("world.millis", System.currentTimeMillis());
+                        }
 
-                case RESOURCE_NETHER:
+                        plugin.getData().set("world.papi", System.currentTimeMillis());
 
-                    Bukkit.broadcastMessage(MsgType.RESETTING_THE_NETHER.getMessage());
+                        break;
 
-                    if (Config.Setting.NETHER_STORE_TIME.getBoolean()) {
-                        plugin.getData().set("nether.millis", System.currentTimeMillis());
-                    }
+                    case RESOURCE_NETHER:
 
-                    plugin.getData().set("nether.papi", System.currentTimeMillis());
+                        Bukkit.broadcastMessage(MsgType.RESETTING_THE_NETHER.getMessage());
 
-                    break;
+                        if (Config.Setting.NETHER_STORE_TIME.getBoolean()) {
+                            plugin.getData().set("nether.millis", System.currentTimeMillis());
+                        }
+
+                        plugin.getData().set("nether.papi", System.currentTimeMillis());
+
+                        break;
+                }
+
+                plugin.saveData();
+                plugin.reloadData();
+                plugin.saveData();
+
+                // Capture world folder before unloading.
+                Path worldFolder = currentWorld.getWorldFolder().toPath();
+
+                // Empty world and unload before deleting files.
+                unloadWorld(currentWorld, false);
+                // Delete world folder.
+                MiscUtils.deleteDirectory(worldFolder.toFile());
+
+                ChatUtils.log("Reset Phase 2 completed...");
+
+            } catch (Exception e) {
+
+                ChatUtils.log("World reset failed: " + e.getMessage());
+                e.printStackTrace();
+
+                HandlerList.unregisterAll(this);
+                return;
             }
 
-            plugin.saveData();
-            plugin.reloadData();
-            plugin.saveData();
-
-            Bukkit.unloadWorld(world, false);
-
-            MiscUtils.deleteDirectory(world.getWorldFolder());
-
-            ChatUtils.log("Phase 2 completed...");
-
-            //Phase 3
+            // Reset Phase 3 = Re-generation
             TaskUtils.taskLater(() -> {
 
-                generate();
+                try {
 
-                ChatUtils.log("Phase 3 completed...");
+                    generate();
 
-                //Phase 4
-                TaskUtils.taskLater(() -> {
+                    ChatUtils.log("Reset Phase 3 completed...");
 
-                    switch (this.resourceWorldType) {
+                } catch (Exception e) {
 
-                        case RESOURCE_END:
-
-                            if (Config.Setting.END_COMMANDS_ENABLED.getBoolean()) {
-
-                                for (String cmd : Config.Setting.END_COMMANDS_COMMANDS.getStringList()) {
-
-                                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
-                                }
-                            }
-
-                            Bukkit.broadcastMessage(MsgType.END_HAS_BEEN_RESET.getMessage());
-
-                            break;
-
-                        case RESOURCE_WORLD:
-                            if (Config.Setting.WORLD_COMMANDS_ENABLED.getBoolean()) {
-                                for (String cmd : Config.Setting.WORLD_COMMANDS_COMMANDS.getStringList()) {
-                                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
-                                }
-                            }
-
-                            Bukkit.broadcastMessage(MsgType.WORLD_HAS_BEEN_RESET.getMessage());
-
-                            break;
-                        case RESOURCE_NETHER:
-
-                            if (Config.Setting.NETHER_COMMANDS_ENABLED.getBoolean()) {
-
-                                for (String cmd : Config.Setting.NETHER_COMMANDS_COMMANDS.getStringList()) {
-                                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
-                                }
-                            }
-
-                            Bukkit.broadcastMessage(MsgType.NETHER_HAS_BEEN_RESET.getMessage());
-
-                            break;
-                    }
+                    ChatUtils.log("Failed to regenerate world: " + e.getMessage());
+                    e.printStackTrace();
 
                     HandlerList.unregisterAll(this);
+                    return;
+                }
 
-                    ChatUtils.log("All phases completed!");
+                // Reset Phase 4 = Post Reset Handling
+                TaskUtils.taskLater(() -> {
+
+                    try {
+                        switch (this.resourceWorldType) {
+
+                            case RESOURCE_END:
+
+                                if (Config.Setting.END_COMMANDS_ENABLED.getBoolean()) {
+
+                                    for (String cmd : Config.Setting.END_COMMANDS_COMMANDS.getStringList()) {
+                                        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
+                                    }
+                                }
+
+                                Bukkit.broadcastMessage(MsgType.END_HAS_BEEN_RESET.getMessage());
+
+                                break;
+
+                            case RESOURCE_WORLD:
+
+                                if (Config.Setting.WORLD_COMMANDS_ENABLED.getBoolean()) {
+
+                                    for (String cmd : Config.Setting.WORLD_COMMANDS_COMMANDS.getStringList()) {
+                                        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
+                                    }
+                                }
+
+                                Bukkit.broadcastMessage(MsgType.WORLD_HAS_BEEN_RESET.getMessage());
+
+                                break;
+
+                            case RESOURCE_NETHER:
+
+                                if (Config.Setting.NETHER_COMMANDS_ENABLED.getBoolean()) {
+
+                                    for (String cmd : Config.Setting.NETHER_COMMANDS_COMMANDS.getStringList()) {
+                                        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
+                                    }
+                                }
+
+                                Bukkit.broadcastMessage(MsgType.NETHER_HAS_BEEN_RESET.getMessage());
+
+                                break;
+                        }
+
+                        ChatUtils.log("All Reset phases completed!");
+                    } finally {
+                        HandlerList.unregisterAll(this);
+                    }
 
                 }, 160L);
 
@@ -419,17 +531,151 @@ public class CustomWorld implements Listener {
         }, 80L);
     }
 
+    /**
+     * Attempts to load the world, if it already exists.
+     */
+    public World loadWorld() {
+        if (!Bukkit.isPrimaryThread()) {
+            throw new IllegalStateException("World loading must run on the server thread.");
+        }
+        World loaded = world();
+
+        if (loaded != null) {
+            return loaded;
+        }
+        if (path == null || creator == null) {
+            throw new IllegalStateException("No existing world: " + this.name);
+        }
+
+        World rw = creator.createWorld();
+
+        if (rw == null) {
+            throw new IllegalStateException("Failed to load world: " + this.name);
+        }
+
+        configurePostGeneration(rw);
+
+        return rw;
+    }
+
+    /**
+     * Safely unload a world before replacing, deleting or packaging its files.
+     */
+    private void unloadWorld(World rw, boolean save) {
+
+        if (!Bukkit.isPrimaryThread()) {
+            throw new IllegalStateException("World unloading must run on the server thread.");
+        }
+
+        if (rw == null) {
+            throw new IllegalStateException("Cannot unload a null world.");
+        }
+
+        if (Bukkit.getWorld(rw.getUID()) == null) {
+            return;
+        }
+
+        path = rw.getWorldFolder().toPath().toAbsolutePath().normalize();
+
+        creator = (Config.Setting.WORLD_USE_LAZY_INIT.getBoolean() ? WorldCreator.ofKey(rw.getKey()) : new WorldCreator(rw.getName())).copy(rw);
+
+        // Move players out before attempting to unload.
+        World spawnWorld = Bukkit.getWorld(Config.Setting.SETTINGS_SPAWN_WORLD.getString());
+
+        if (spawnWorld == null) {
+            throw new IllegalStateException("Spawn world is not loaded.");
+        }
+
+        if (spawnWorld.getUID().equals(rw.getUID())) {
+            throw new IllegalStateException("Cannot return players into the world being unloaded.");
+        }
+
+        Location spawnLocation = getResetSpawnLocation(spawnWorld);
+
+        emptyWorld(rw, spawnLocation);
+
+        // Verify no players remain in the world.
+        if (!rw.getPlayers().isEmpty()) {
+            throw new IllegalStateException("Players remain in world: " + rw.getName());
+        }
+
+        // Unload the world, saving only when requested.
+        if (!Bukkit.unloadWorld(rw, save)) {
+            throw new IllegalStateException("Failed to unload world: " + rw.getName());
+        }
+
+        ChatUtils.log("Successfully unloaded world: " + rw.getName());
+    }
+
+    /**
+     * Resolve the configured evacuation destination.
+     */
+    private Location getResetSpawnLocation(World spawnWorld) {
+
+        Location spawnLocation = spawnWorld.getSpawnLocation();
+
+        boolean useStoredSpawn = false;
+
+        switch (this.resourceWorldType) {
+
+            case RESOURCE_WORLD:
+                useStoredSpawn = Config.Setting.WORLD_RESET_ON_STARTUP.getBoolean();
+                break;
+
+            case RESOURCE_NETHER:
+                useStoredSpawn = Config.Setting.NETHER_RESET_ON_STARTUP.getBoolean();
+                break;
+
+            case RESOURCE_END:
+                useStoredSpawn = Config.Setting.END_RESET_ON_STARTUP.getBoolean();
+                break;
+        }
+
+        if (useStoredSpawn) {
+
+            Location storedLocation = MiscUtils.stringToLocation(ResourceWorld.getInstance().getData().getString("spawn_location"));
+
+            if (storedLocation != null && storedLocation.getWorld() != null) {
+
+                if (!storedLocation.getWorld().getUID().equals(world().getUID())) {
+                    spawnLocation = storedLocation;
+                }
+            }
+        }
+
+        return spawnLocation;
+    }
+
     private void emptyWorld(World world, Location spawnLocation) {
 
-        for (Player player : Bukkit.getOnlinePlayers()) {
+        if (spawnLocation == null || spawnLocation.getWorld() == null) {
+            throw new IllegalStateException("Invalid return location.");
+        }
 
-            if (!player.getWorld().getUID().equals(world.getUID())) continue;
+        for (Player player : world.getPlayers()) {
 
-            player.teleport(spawnLocation);
+            if (!player.teleport(spawnLocation)) {
+                throw new IllegalStateException("Failed to return player: " + player.getName());
+            }
 
             player.sendMessage(MsgType.TELEPORTED_MESSAGE.getMessage());
         }
+    }
 
+    public Path getPackagePath() {
+        return ResourceWorld.getInstance().getDataPath().resolve("packaged").resolve(this.name + ".tar.gz");
+    }
+
+    public NamespacedKey key() {
+        return NamespacedKey.minecraft(this.name);
+    }
+
+    // world helper method.
+    public World world() {
+        boolean lazyInit = Config.Setting.WORLD_USE_LAZY_INIT.getBoolean();
+
+        // Make sure we are grabbing the world key if we are lazy init.
+        return lazyInit ? Bukkit.getWorld(key()) : Bukkit.getWorld(this.name);
     }
 
     @EventHandler(priority = EventPriority.LOWEST)

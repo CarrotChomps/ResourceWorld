@@ -1,5 +1,7 @@
 package me.nik.resourceworld.commands.subcommands;
 
+import me.nik.resourceworld.ResourceWorld;
+import me.nik.resourceworld.api.ResourceWorldType;
 import me.nik.resourceworld.commands.SubCommand;
 import me.nik.resourceworld.files.Config;
 import me.nik.resourceworld.managers.MsgType;
@@ -106,11 +108,7 @@ public class Teleport extends SubCommand {
 
             case 1: {
 
-                String worldName = Config.Setting.WORLD_NAME.getString();
-                boolean lazyInit = Config.Setting.WORLD_USE_LAZY_INIT.getBoolean();
-
-                world = Bukkit.getWorld(worldName);
-                if(lazyInit) world = Bukkit.getWorld(NamespacedKey.minecraft(worldName));
+                world = ResourceWorld.getInstance().getResourceWorld(ResourceWorldType.RESOURCE_WORLD).world();
 
                 break;
             }
@@ -148,7 +146,10 @@ public class Teleport extends SubCommand {
             }
         }
 
-        if (world == null) return;
+        if (world == null) {
+            player.sendMessage("§cResource world is currently unavailable.");
+            return;
+        }
 
         boolean notBypassing = !player.hasPermission(Permissions.ADMIN.getPermission());
 

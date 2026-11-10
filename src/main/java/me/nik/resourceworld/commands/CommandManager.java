@@ -2,6 +2,7 @@ package me.nik.resourceworld.commands;
 
 import me.nik.resourceworld.ResourceWorld;
 import me.nik.resourceworld.commands.subcommands.Menu;
+import me.nik.resourceworld.commands.subcommands.Package;
 import me.nik.resourceworld.commands.subcommands.Reload;
 import me.nik.resourceworld.commands.subcommands.Reset;
 import me.nik.resourceworld.commands.subcommands.SetSpawn;
@@ -31,6 +32,7 @@ public class CommandManager implements TabExecutor {
         subcommands.add(new Menu(plugin));
         subcommands.add(new Reset(plugin));
         subcommands.add(new SetSpawn(plugin));
+        subcommands.add(new Package(plugin));
     }
 
     public List<SubCommand> getSubcommands() {

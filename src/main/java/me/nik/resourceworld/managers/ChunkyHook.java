@@ -14,15 +14,11 @@ import org.popcraft.chunky.api.ChunkyAPI;
  */
 public class ChunkyHook {
 
-    private final ResourceWorld plugin;
-
     private boolean isLoaded = false;
 
     private ChunkyAPI chunky = null;
 
-    public ChunkyHook(ResourceWorld plugin) {
-        this.plugin = plugin;
-    }
+    public ChunkyHook() {}
 
     public void verifyChunky() {
         try {

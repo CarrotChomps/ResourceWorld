@@ -22,16 +22,28 @@ public class MiscUtils {
     }
 
     public static void deleteDirectory(File directory) {
-        if (directory.exists()) {
-            File[] files = directory.listFiles();
-            if (files != null)
-                for (File file : files) {
-                    if (file.isDirectory()) {
-                        deleteDirectory(file);
-                    } else {
-                        file.delete();
-                    }
+
+        if (!directory.exists()) return;
+
+        File[] files = directory.listFiles();
+
+        if (files == null && directory.isDirectory()) {
+            throw new IllegalStateException("Failed to list directory: " + directory);
+        }
+
+        if (files != null) {
+            for (File file : files) {
+                if (file.isDirectory()) {
+                    deleteDirectory(file);
+                } else if (!file.delete()) {
+                    throw new IllegalStateException("Failed to delete file: " + file);
                 }
+            }
+        }
+
+        // Delete the directory itself after its contents.
+        if (!directory.delete()) {
+            throw new IllegalStateException("Failed to delete directory: " + directory);
         }
     }
 

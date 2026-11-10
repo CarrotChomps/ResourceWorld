@@ -31,11 +31,13 @@ public class TarGzUtil {
 
             // Walk through the source directory and add files recursively
             try (Stream<Path> pathStream = Files.walk(sourceDir)) {
-                pathStream.forEach(path -> {
+                java.util.Iterator<Path> paths = pathStream.iterator();
+                while (paths.hasNext()) {
+                    Path path = paths.next();
                     // Get path relative to the source directory so the archive root stays clean
                     Path relativePath = sourceDir.relativize(path);
                     if (relativePath.toString().isEmpty()) {
-                        return; // Skip the root directory itself
+                        continue; // Skip the root directory itself
                     }
 
                     File file = path.toFile();
@@ -52,9 +54,9 @@ public class TarGzUtil {
                         tarOut.closeArchiveEntry();
                     } catch (IOException e) {
                         ChatUtils.log("[TarGzUtil] Failed to pack file into archive: " + path);
-                        e.printStackTrace();
+                        throw e;
                     }
-                });
+                }
             }
 
             tarOut.finish();

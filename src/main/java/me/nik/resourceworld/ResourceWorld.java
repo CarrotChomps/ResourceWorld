@@ -21,7 +21,7 @@ import me.nik.resourceworld.tasks.AlwaysDay;
 import me.nik.resourceworld.tasks.ResetEndWorld;
 import me.nik.resourceworld.tasks.ResetNetherWorld;
 import me.nik.resourceworld.tasks.ResetWorld;
-import me.nik.resourceworld.utils.ChatUtils;
+import me.nik.resourceworld.utils.WorldDeliveryService;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Difficulty;
@@ -31,6 +31,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.event.HandlerList;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -53,7 +54,9 @@ public final class ResourceWorld extends JavaPlugin {
     };
     private final Map<ResourceWorldType, CustomWorld> resourceWorlds = new HashMap<>();
     private final List<ListenerModule> listenerModules = new ArrayList<>();
-    private ChunkyHook chunkyHook = new ChunkyHook(this);
+
+    private final ChunkyHook chunkyHook = new ChunkyHook();
+    private final WorldDeliveryService worldDelivery = new WorldDeliveryService();
 
     public static ResourceWorld getInstance() {
         return plugin;
@@ -85,6 +88,9 @@ public final class ResourceWorld extends JavaPlugin {
         this.config.reset();
         this.lang.reload();
         this.lang.save();
+
+        // Shutdown HttpServer
+        if (worldDelivery != null) worldDelivery.stop();
 
         HandlerList.unregisterAll(this);
         this.getServer().getScheduler().cancelTasks(this);
@@ -293,6 +299,13 @@ public final class ResourceWorld extends JavaPlugin {
             new PapiHook(this).register();
         }
 
+        //HTTP Setup
+        try {
+            worldDelivery.initialize();
+        } catch (IOException e) {
+            getLogger().severe("Failed to start world delivery receiver: " + e.getMessage());
+        }
+
         //BStats
         new MetricsLite(this, 6981);
     }
@@ -326,5 +339,9 @@ public final class ResourceWorld extends JavaPlugin {
 
     public void reloadData() {
         data.reload();
+    }
+
+    public WorldDeliveryService getWorldDelivery() {
+        return worldDelivery;
     }
 }
