@@ -134,24 +134,26 @@ public class CustomWorld implements Listener {
     }
 
     private void packageWorld(World rw) {
-        Location spawnLocation = Bukkit.getWorld(Config.Setting.SETTINGS_SPAWN_WORLD.getString()).getSpawnLocation();
+        Bukkit.getScheduler().runTask(ResourceWorld.getInstance(), ()-> {
+            Location spawnLocation = Bukkit.getWorld(Config.Setting.SETTINGS_SPAWN_WORLD.getString()).getSpawnLocation();
 
-        Bukkit.unloadWorld(rw, true);
+            Bukkit.unloadWorld(rw, true);
 
-        emptyWorld(rw, spawnLocation);
+            emptyWorld(rw, spawnLocation);
 
-        Path worldFolder = rw.getWorldFolder().toPath();
+            Path worldFolder = rw.getWorldFolder().toPath();
 
-        Path packagedPath = ResourceWorld.getInstance().getDataPath()
-                .resolve("packaged")
-                .resolve(this.name + ".tar.gz");
+            Path packagedPath = ResourceWorld.getInstance().getDataPath()
+                    .resolve("packaged")
+                    .resolve(this.name + ".tar.gz");
 
-        ChatUtils.log("Packaging World...");
-        try {
-            TarGzUtil.zip(worldFolder, packagedPath);
-        } catch (Exception e) {
-            ChatUtils.log("Error while trying to pregenerate world: " + e.getMessage());
-        }
+            ChatUtils.log("Packaging World...");
+            try {
+                TarGzUtil.zip(worldFolder, packagedPath);
+            } catch (Exception e) {
+                ChatUtils.log("Error while trying to pregenerate world: " + e.getMessage());
+            }
+        });
     }
 
     private void unpackWorldFirst() {
