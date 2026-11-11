@@ -1,3 +1,4 @@
+
 package me.nik.resourceworld.managers.custom;
 
 import me.nik.resourceworld.ResourceWorld;
@@ -13,8 +14,13 @@ import org.bukkit.event.HandlerList;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerTeleportEvent;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
 
 @SuppressWarnings("all")
 public class CustomWorld implements Listener {
@@ -36,6 +42,8 @@ public class CustomWorld implements Listener {
     private Path path;
     private WorldCreator creator;
     private boolean packaging;
+    private boolean resetting;
+    private World pendingAutomaticPackage;
 
     public CustomWorld(String name, Difficulty difficulty, WorldType type, World.Environment environment, boolean structures, boolean useSeed, long seed, boolean useBorder, int borderSize, boolean pvp, boolean keepInventory, ResourceWorldType resourceWorldType) {
         this.name = name;
@@ -57,8 +65,14 @@ public class CustomWorld implements Listener {
     }
 
     public CustomWorld generate() {
+        if (resetting) {
+            throw new IllegalStateException("Cannot generate while resetting world: " + this.name);
+        }
+        return generateWorld();
+    }
 
-        // we have a mannual package command, so this can happen.
+    private CustomWorld generateWorld() {
+
         if (packaging) {
             throw new IllegalStateException("Cannot generate while packaging world: " + this.name);
         }
@@ -108,7 +122,12 @@ public class CustomWorld implements Listener {
         try {
             rw = wc.createWorld();
         } catch (Exception e) {
-            throw new IllegalStateException("Failed to create world: " + this.name, e);
+            ChatUtils.log("Error while trying to create world: " + e.getMessage());
+            throw new IllegalStateException("Failed to load world: " + this.name, e);
+        }
+
+        if (rw == null) {
+            throw new IllegalStateException("WorldCreator returned null for " + this.name);
         }
 
         ChatUtils.log("Generation Phase 3 Complete");
@@ -118,6 +137,8 @@ public class CustomWorld implements Listener {
         CustomWorld customWorld = configurePostGeneration(rw);
 
         ChatUtils.log("Generation Phase 4 Complete");
+
+        World generatedWorld = rw;
 
         // Phase 5 = Optional pregeneration of chunks using Chunky
 
@@ -133,105 +154,165 @@ public class CustomWorld implements Listener {
                 Bukkit.getScheduler().runTaskLater(ResourceWorld.getInstance(), () -> {
 
                     if (Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
-                        packageWorld();
+                        packageGeneratedWorld(generatedWorld);
                     }
 
-                }, 20L * 10); // TODO make delay and the padding configurable
+                }, 20L * 10);
             });
 
         } else if (Config.Setting.WORLD_PACKAGE_AFTER.getBoolean()) {
 
             ChatUtils.log("Generation Phase 5 Skipped");
-            packageWorld();
+            packageGeneratedWorld(generatedWorld);
         }
 
         return customWorld;
     }
 
     public void packageWorld() {
-
-        Bukkit.getScheduler().runTask(ResourceWorld.getInstance(), () -> {
-
-            if (packaging) {
-                ChatUtils.log("World packaging is already in progress: " + this.name);
-                return;
-            }
-
-            World rw = world();
-
-            if (rw == null) {
-                ChatUtils.log("Cannot package world because it is not loaded.");
-                return;
-            }
-
-            Path worldFolder = rw.getWorldFolder().toPath().toAbsolutePath().normalize();
-
-            Path packagedPath = getPackagePath();
-
-            try {
-                // Empty world, save chunks and close world storage.
-                unloadWorld(rw, true);
-                packaging = true;
-
-            } catch (Exception e) {
-                ChatUtils.log("Failed to unload world before packaging: " + e.getMessage());
-                return;
-            }
-
-            try {
-                Bukkit.getScheduler().runTaskAsynchronously(ResourceWorld.getInstance(), () -> {
-
-                    try {
-
-                        ChatUtils.log("Packaging World...");
-
-                        TarGzUtil.zip(worldFolder, packagedPath);
-
-                        ChatUtils.log("World packaged successfully.");
-
-                        // Check config if we are delivering.
-                        if (Config.Setting.WORLD_DELIVERY_ENABLED.getBoolean()) {
-
-                            // Call delivery and then any code that needs to follow.
-                            WorldDeliveryService.deliverPackagedWorld(packagedPath).whenComplete((result, error) -> {
-                                if (error != null) {
-                                    ChatUtils.log("World delivery failed: " + error.getMessage());
-                                } else {
-                                    ChatUtils.log("World delivery completed successfully.");
-                                }
-                                finishPackaging(); // hey look, code that needs to follow!
-                            });
-                        } else {
-                            finishPackaging();
-                        }
-
-                    } catch (Exception e) {
-                        ChatUtils.log("Error while packaging world: " + e.getMessage());
-                        e.printStackTrace();
-                        // still end packaging
-                        finishPackaging();
+        packageWorld(Config.Setting.WORLD_DELIVERY_ENABLED.getBoolean())
+                .whenComplete((archive, error) -> {
+                    if (error != null) {
+                        ChatUtils.log("Automatic world packaging failed=" + error.getMessage());
                     }
                 });
-            } catch (Exception e) {
-                // Scheduling can fail after the world has already been unloaded.
-                finishPackaging();
-                throw e;
-            }
-        });
     }
 
-    private void finishPackaging() {
-        Bukkit.getScheduler().runTask(ResourceWorld.getInstance(), () -> {
-            try {
-                loadWorld();
-                ChatUtils.log("World reloaded after packaging: " + this.name);
-            } catch (Exception e) {
-                ChatUtils.log("Failed to reload world after packaging: " + e.getMessage());
-                e.printStackTrace();
-            } finally {
-                packaging = false;
+    private void packageGeneratedWorld(World generatedWorld) {
+        if (world() != generatedWorld) {
+            return;
+        }
+        if (resetting) {
+            pendingAutomaticPackage = generatedWorld;
+            return;
+        }
+        packageWorld();
+    }
+
+    public CompletableFuture<Path> packageWorld(boolean deliver) {
+        CompletableFuture<Path> result = new CompletableFuture<>();
+
+        ResourceWorld plugin = ResourceWorld.getInstance();
+
+        Executor serverThread = task -> Bukkit.getScheduler().runTask(plugin, task);
+
+        try {
+            if (Bukkit.isPrimaryThread()) {
+                queuePackaging(deliver, result, serverThread);
+            } else {
+                serverThread.execute(() -> queuePackaging(deliver, result, serverThread));
             }
-        });
+        } catch (RuntimeException e) {
+            result.completeExceptionally(e);
+        }
+        return result;
+    }
+
+    private void queuePackaging(boolean deliver, CompletableFuture<Path> result, Executor serverThread) {
+        if (packaging || resetting) {
+            result.completeExceptionally(new IllegalStateException(
+                    "World " + (packaging ? "packaging" : "reset") + " is already in progress."));
+            return;
+        }
+
+        try {
+            World rw = world();
+            if (rw == null) {
+                result.completeExceptionally(new IllegalStateException("Resource World is not loaded."));
+                return;
+            }
+
+            // Reserve the world now, but unload on the next server tick.
+            packaging = true;
+            serverThread.execute(() -> startPackaging(rw, deliver, result, serverThread));
+        } catch (RuntimeException e) {
+            packaging = false;
+            result.completeExceptionally(e);
+        }
+    }
+
+    private void startPackaging(World rw, boolean deliver, CompletableFuture<Path> result, Executor serverThread) {
+        if (Bukkit.getWorld(rw.getUID()) != rw) {
+            packaging = false;
+            result.completeExceptionally(new IllegalStateException("Resource World changed before packaging could start."));
+            return;
+        }
+
+        try {
+            Path archive = getPackagePath().toAbsolutePath().normalize();
+            Path worldFolder = rw.getWorldFolder().toPath().toAbsolutePath().normalize();
+            unloadWorld(rw, true);
+
+            ResourceWorld plugin = ResourceWorld.getInstance();
+            CompletableFuture.runAsync(() -> {
+                        try {
+                            writeArchive(worldFolder, archive);
+                        } catch (IOException | RuntimeException e) {
+                            throw new CompletionException("Could not create the world archive.", e);
+                        }
+                    }, task -> Bukkit.getScheduler().runTaskAsynchronously(plugin, task))
+                    .thenComposeAsync(ignored -> {
+                        ChatUtils.log("World packaged successfully: " + archive);
+                        if (!deliver) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                        return WorldDeliveryService.deliverRequestedArchive(archive)
+                                .handle((deliveryResult, error) -> {
+                                    if (error != null) {
+                                        throw new CompletionException("Archive created, but delivery failed: "
+                                                + error.getMessage(), error);
+                                    }
+                                    return null;
+                                });
+                    }, serverThread)
+                    .handleAsync((ignored, error) -> {
+                        if (deliver && error == null) {
+                            ChatUtils.log("World delivery completed successfully.");
+                        }
+                        finishPackaging(result, archive, error);
+                        return null;
+                    }, serverThread)
+                    .exceptionally(error -> {
+                        // The scheduler can reject the reload during plugin shutdown.
+                        result.completeExceptionally(new IllegalStateException(
+                                "Could not schedule the world reload. Check the server log.", error));
+                        return null;
+                    });
+        } catch (RuntimeException e) {
+            finishPackaging(result, null, e);
+        }
+    }
+
+    private void writeArchive(Path worldFolder, Path archive) throws IOException {
+        Files.createDirectories(archive.getParent());
+        Path temporary = Files.createTempFile(archive.getParent(), archive.getFileName().toString(), ".tmp");
+        try {
+            TarGzUtil.zip(worldFolder, temporary);
+            Files.move(temporary, archive, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private void finishPackaging(CompletableFuture<Path> result, Path archive, Throwable error) {
+        try {
+            loadWorld();
+            ChatUtils.log("World available after packaging: " + this.name);
+        } catch (RuntimeException reloadError) {
+            IllegalStateException failure = new IllegalStateException((error == null ? "Archive created. " : error.getMessage() + " ") + "World reload failed: " + reloadError.getMessage(), reloadError);
+            if (error != null) {
+                failure.addSuppressed(error);
+            }
+            error = failure;
+        } finally {
+            packaging = false;
+        }
+
+        if (error == null) {
+            result.complete(archive);
+        } else {
+            result.completeExceptionally(error);
+        }
     }
 
     private void unpackWorldFirst() {
@@ -246,7 +327,8 @@ public class CustomWorld implements Listener {
         }
 
         try {
-            // Create the destination.
+
+            // Create the destination so zip() can write a containing directory.
             Path destinationPath = existingWorldFolder();
 
             // Ensure destination directories exist before unpacking.
@@ -266,15 +348,16 @@ public class CustomWorld implements Listener {
 
     private Path existingWorldFolder() {
         if (path != null) return path;
-
         if (Config.Setting.WORLD_USE_LAZY_INIT.getBoolean()) {
-
             if (Bukkit.getWorlds().isEmpty()) {
                 throw new IllegalStateException("No owning world loaded for dimension: " + key());
             }
-
             // proper world folder look up
-            return Bukkit.getWorldContainer().toPath().resolve("dimensions").resolve(key().getNamespace()).resolve(key().getKey()).toAbsolutePath().normalize();
+            return Bukkit.getWorlds().get(0).getWorldFolder().toPath()
+                    .resolve("dimensions")
+                    .resolve(key().getNamespace())
+                    .resolve(key().getKey())
+                    .toAbsolutePath().normalize();
         }
         return Bukkit.getWorldContainer().toPath().resolve(this.name).toAbsolutePath().normalize();
     }
@@ -283,9 +366,6 @@ public class CustomWorld implements Listener {
      * (Pre-generation)
      * Apply settings to the world creator based on config;
      * skips biome provider setup if an archive was unpacked.
-     *
-     * @param wc          The World Creator loading in the Resource World
-     * @param unpackFirst Whether this was called with the world already unpacked. (no pre-generation needed)
      */
     private void configurePreGeneration(WorldCreator wc, boolean unpackFirst) {
 
@@ -304,7 +384,6 @@ public class CustomWorld implements Listener {
         }
 
         // Grab config defined biome providing datapack and dimension name.
-
         try {
 
             String datapack = Config.Setting.WORLD_DATAPACK_DATAPACK_NAME.getString();
@@ -365,8 +444,8 @@ public class CustomWorld implements Listener {
 
     public void reset() {
 
-        if (packaging) {
-            ChatUtils.log("Cannot reset while packaging world: " + this.name);
+        if (packaging || resetting) {
+            ChatUtils.log("A world operation is already in progress: " + this.name);
             return;
         }
 
@@ -381,15 +460,27 @@ public class CustomWorld implements Listener {
         ResourceWorld plugin = ResourceWorld.getInstance();
 
         // Register listener before the reset starts.
-        Bukkit.getPluginManager().registerEvents(this, plugin);
+        resetting = true;
+        try {
+            Bukkit.getPluginManager().registerEvents(this, plugin);
+        } catch (RuntimeException e) {
+            finishReset();
+            throw e;
+        }
 
-        ChatUtils.log("Reset Phase 1 completed...");
+        ChatUtils.log("Phase 1 completed...");
 
         // Reset Phase 2 = World Deletion
-        TaskUtils.taskLater(() -> {
+        scheduleResetPhase(() -> {
 
             // Ensure the world still exists before proceeding.
             World currentWorld = world();
+
+            if (currentWorld == null) {
+                ChatUtils.log("Cannot reset while packaging world: " + this.name);
+                finishReset();
+                return;
+            }
 
             try {
 
@@ -444,6 +535,11 @@ public class CustomWorld implements Listener {
                 // Delete world folder.
                 MiscUtils.deleteDirectory(worldFolder.toFile());
 
+                // Do not regenerate over an undeleted world.
+                if (Files.exists(worldFolder)) {
+                    throw new IllegalStateException("Failed to delete world folder: " + worldFolder);
+                }
+
                 ChatUtils.log("Reset Phase 2 completed...");
 
             } catch (Exception e) {
@@ -451,16 +547,16 @@ public class CustomWorld implements Listener {
                 ChatUtils.log("World reset failed: " + e.getMessage());
                 e.printStackTrace();
 
-                HandlerList.unregisterAll(this);
+                finishReset();
                 return;
             }
 
             // Reset Phase 3 = Re-generation
-            TaskUtils.taskLater(() -> {
+            scheduleResetPhase(() -> {
 
                 try {
 
-                    generate();
+                    generateWorld();
 
                     ChatUtils.log("Reset Phase 3 completed...");
 
@@ -469,7 +565,7 @@ public class CustomWorld implements Listener {
                     ChatUtils.log("Failed to regenerate world: " + e.getMessage());
                     e.printStackTrace();
 
-                    HandlerList.unregisterAll(this);
+                    finishReset();
                     return;
                 }
 
@@ -521,7 +617,7 @@ public class CustomWorld implements Listener {
 
                         ChatUtils.log("All Reset phases completed!");
                     } finally {
-                        HandlerList.unregisterAll(this);
+                        finishReset();
                     }
 
                 }, 160L);
@@ -531,9 +627,32 @@ public class CustomWorld implements Listener {
         }, 80L);
     }
 
-    /**
-     * Attempts to load the world, if it already exists.
-     */
+    private void scheduleResetPhase(Runnable phase, long delay) {
+        try {
+            TaskUtils.taskLater(() -> {
+                try {
+                    phase.run();
+                } catch (RuntimeException e) {
+                    finishReset();
+                    throw e;
+                }
+            }, delay);
+        } catch (RuntimeException e) {
+            finishReset();
+            throw e;
+        }
+    }
+
+    private void finishReset() {
+        HandlerList.unregisterAll(this);
+        resetting = false;
+        World generatedWorld = pendingAutomaticPackage;
+        pendingAutomaticPackage = null;
+        if (generatedWorld != null) {
+            packageGeneratedWorld(generatedWorld);
+        }
+    }
+
     public World loadWorld() {
         if (!Bukkit.isPrimaryThread()) {
             throw new IllegalStateException("World loading must run on the server thread.");
@@ -680,6 +799,13 @@ public class CustomWorld implements Listener {
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onWorldTeleport(PlayerTeleportEvent e) {
-        if (e.getTo().getWorld().getName().equals(this.name)) e.setCancelled(true);
+
+        if (e.getTo() == null || e.getTo().getWorld() == null) return;
+
+        World arrival =  e.getTo().getWorld();
+
+        if (arrival.getKey().equals(key()) || arrival.getName().equals(this.name)) {
+            e.setCancelled(true);
+        }
     }
 }

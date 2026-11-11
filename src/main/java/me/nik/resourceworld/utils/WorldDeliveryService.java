@@ -208,6 +208,11 @@ public final class WorldDeliveryService {
 
         if (!Config.Setting.WORLD_DELIVERY_ENABLED.getBoolean()) return CompletableFuture.completedFuture(null);
 
+        return deliverRequestedArchive(source);
+    }
+
+    /** Send an explicitly requested archive, regardless of the automatic delivery setting. */
+    public static CompletableFuture<Void> deliverRequestedArchive(final Path source) {
         String method = Config.Setting.WORLD_DELIVERY_METHOD.getString().trim().toUpperCase(Locale.ROOT);
 
         List<String> destinations = new ArrayList<>(
@@ -225,7 +230,7 @@ public final class WorldDeliveryService {
                 deliver(source, method, destinations, token, timeout);
             } catch (Exception e) {
                 ChatUtils.log(LOG_PREFIX + "Delivery failed: " + e.getMessage());
-                throw new CompletionException(e);
+                throw new CompletionException(e.getMessage(), e);
             }
 
         }, task -> Bukkit.getScheduler().runTaskAsynchronously(ResourceWorld.getInstance(), task));
@@ -237,8 +242,7 @@ public final class WorldDeliveryService {
         if (!method.equals("LOCAL") && !method.equals("HTTP")) throw new IOException("Invalid delivery method: " + method);
 
         if (destinations.isEmpty()) {
-            ChatUtils.log(LOG_PREFIX + "No destinations configured.");
-            return;
+            throw new IOException("No delivery destinations configured.");
         }
 
         if (method.equals("HTTP") && (token == null || token.isEmpty())) throw new IOException("HTTP authentication token is missing.");
@@ -275,7 +279,7 @@ public final class WorldDeliveryService {
 
         ChatUtils.log(LOG_PREFIX + "Delivery complete. Successful=" + successes + ", Failed=" + (destinations.size() - successes));
 
-        if (successes != destinations.size()) throw new IOException("One or more world deliveries failed.");
+        if (successes != destinations.size()) throw new IOException("Delivered to " + successes + " of " + destinations.size() + " destinations. Check the server log.");
     }
 
     /** Delivery Methods **/

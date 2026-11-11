@@ -5,13 +5,15 @@ import me.nik.resourceworld.api.ResourceWorldType;
 import me.nik.resourceworld.commands.SubCommand;
 import me.nik.resourceworld.managers.Permissions;
 import me.nik.resourceworld.managers.custom.CustomWorld;
-import me.nik.resourceworld.utils.WorldDeliveryService;
+import me.nik.resourceworld.utils.ChatUtils;
+import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletionException;
+import java.util.logging.Level;
 
 public class Package extends SubCommand {
 
@@ -28,7 +30,7 @@ public class Package extends SubCommand {
 
     @Override
     public String getDescription() {
-        return "Package the current resource world you are standing in";
+        return "Package the Resource World, with optional delivery";
     }
 
     @Override
@@ -53,39 +55,37 @@ public class Package extends SubCommand {
 
     @Override
     public void perform(CommandSender sender, String[] args) {
-        if(sender instanceof Player ){
-            Player player = (Player) sender;
 
-            //TODO only sends overworld rw atm
-            CustomWorld resourceWorld = ResourceWorld.getInstance().getResourceWorld(ResourceWorldType.RESOURCE_WORLD);
+        // faster boolean check for if the delivery arg is used.
+        boolean deliver = args.length == 2 && args[1].equalsIgnoreCase("deliver");
 
-            if (resourceWorld != null) {
-                if(resourceWorld.world() != null) {
-
-                    resourceWorld.packageWorld();
-
-                    player.sendMessage("Resource World packaged!");
-                } else {
-                    player.sendMessage("Resource World isn't loaded...");
-                }
-
-                // delivery arg
-                if(args.length == 2) {
-
-                    if(args[1].equalsIgnoreCase("deliver")) {
-                        player.sendMessage("Delivering Packaged World...");
-                        Path source = resourceWorld.getPackagePath();
-                        if(source == null) {
-                            player.sendMessage("Resource World package not found...");
-                            return;
-                        }
-                        WorldDeliveryService.deliverPackagedWorld(source);
-                    }
-                }
-            } else {
-                player.sendMessage("Resource World hasn't been created yet...");
-            }
+        if (args.length > 2 || (args.length == 2 && !deliver)) {
+            sender.sendMessage("Usage: " + getSyntax());
+            return;
         }
+
+        //TODO add support for dimensions
+        CustomWorld resourceWorld = plugin.getResourceWorld(ResourceWorldType.RESOURCE_WORLD);
+
+        if (resourceWorld == null) {
+            sender.sendMessage("Resource World hasn't been created yet.");
+            return;
+        }
+
+        sender.sendMessage(deliver ? "Requested Resource World packaging and delivery." : "Requested Resource World packaging.");
+
+        resourceWorld.packageWorld(deliver).whenComplete((archive, error) -> {
+            if (error != null) {
+                ChatUtils.log("Resource World package command failed=" + error);
+            }
+
+            if (error == null) {
+                sender.sendMessage(deliver ? "Resource World packaged and delivered." : "Resource World packaged.");
+                return;
+            }
+
+            sender.sendMessage("Resource World operation failed. Check the server log.");
+        });
     }
 
     @Override
