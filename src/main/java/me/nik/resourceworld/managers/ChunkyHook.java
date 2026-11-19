@@ -6,6 +6,9 @@ import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.popcraft.chunky.api.ChunkyAPI;
 
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
 /**
  * Simple Hook listening to the Chunky API
  * <p>
@@ -18,16 +21,33 @@ public class ChunkyHook {
 
     private ChunkyAPI chunky = null;
 
+    // lock which worlds are pregenerating to prevent watch dog crashes
+    private final ConcurrentMap<String, Runnable> pendingCompletions = new ConcurrentHashMap<>();
+
     public ChunkyHook() {}
 
     public void verifyChunky() {
         try {
-            this.chunky = Bukkit.getServicesManager().load(ChunkyAPI.class);
-            this.isLoaded = (this.chunky != null);
-
             if (isLoaded) {
                 ChatUtils.log("Successfully hooked into Chunky API!");
             }
+
+            ChunkyAPI api = Bukkit.getServicesManager().load(ChunkyAPI.class);
+            if (api == null || api.version() != 0) {
+                return;
+            }
+
+            // lock the generation session to prevent resets from making watch dog mad
+            api.onGenerationComplete(event -> {
+                Runnable onComplete = pendingCompletions.remove(event.world());
+                if (onComplete != null) {
+                    ChatUtils.log("Generation completed for " + event.world());
+                    onComplete.run();
+                }
+            });
+
+            chunky = api;
+            isLoaded = true;
         } catch (Exception e) {
             ChatUtils.log("An exception occurred when verifying chunky...");
         }
@@ -40,21 +60,28 @@ public class ChunkyHook {
             return;
         }
 
-        if (!isLoaded || chunky == null) {
+        if(!isLoaded || chunky == null) {
             ChatUtils.log("Skipping pregeneration: Chunky API is not available.");
             return;
         }
 
-        if (chunky.version() == 0) {
-            chunky.startTask(world.getName(), "square", centerX, centerY, radius, radius, "concentric");
-            chunky.onGenerationComplete(event -> {
-                ChatUtils.log("Generation completed for " + event.world()); // would be nice to have time to generate...
-                // check if config has package after pregenerate.
-                if(true) {
-                    // packaging process.
-                    onComplete.run();
-                }
-            });
+        // pregen session lock logic
+        String worldName = world.getName();
+        if (pendingCompletions.putIfAbsent(worldName, onComplete) != null) {
+            ChatUtils.log("Already waiting for Chunky to finish " + worldName);
+            return;
+        }
+
+        boolean started = false;
+        try {
+            started = chunky.startTask(worldName, "square", centerX, centerY, radius, radius, "concentric");
+            if (!started) {
+                ChatUtils.log("Chunky declined to start pregeneration for " + worldName);
+            }
+        } finally {
+            if (!started) {
+                pendingCompletions.remove(worldName, onComplete);
+            }
         }
     }
 
