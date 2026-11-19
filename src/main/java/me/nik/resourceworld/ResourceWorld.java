@@ -215,16 +215,22 @@ public final class ResourceWorld extends JavaPlugin {
 
         //Initialize tasks
 
+        // Fixed logic for world resets
+        // 1. World Resets happen after server restart if timer was <= 0
+        // 2. World Restarts on start up setting **now** overrides the automated resets
+        // TODO: update same logic for rest of worlds (pending Nik approval)
         if (Config.Setting.WORLD_ENABLED.getBoolean()) {
 
-            if (Config.Setting.WORLD_RESETS_ENABLED.getBoolean()) {
+            if (Config.Setting.WORLD_RESET_ON_STARTUP.getBoolean()) {
+                new ResetWorld(this).runTaskLater(this, 120L); //Reset on startup
+            } else if (Config.Setting.WORLD_RESETS_ENABLED.getBoolean()) {
 
                 long timer;
 
                 if (!Config.Setting.WORLD_STORE_TIME.getBoolean()) {
                     timer = Config.Setting.WORLD_RESETS_INTERVAL.getLong() * 72000L;
                 } else if (this.data.get().getLong("world.timer") <= 0) {
-                    timer = Config.Setting.WORLD_RESETS_INTERVAL.getLong() * 72000L;
+                    timer = 120L;
                 } else {
                     timer = this.data.get().getLong("world.timer");
                 }
@@ -232,10 +238,6 @@ public final class ResourceWorld extends JavaPlugin {
                 new ResetWorld(this).runTaskTimer(this,
                         timer,
                         Config.Setting.WORLD_RESETS_INTERVAL.getLong() * 72000L);
-            } else {
-                if (Config.Setting.WORLD_RESET_ON_STARTUP.getBoolean()) {
-                    new ResetWorld(this).runTaskLater(this, 120L); //Reset on startup
-                }
             }
         }
 
